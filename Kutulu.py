@@ -37,10 +37,10 @@ def begin():
             entities.append(entity)
             
             log(entity)
-            if entity.isExplorer():
-                log(entity.yelled_players)
+            #if entity.isExplorer():
+            #    log(entity.yelled_players)
         
-        log(yells_occurred)
+        #log(yells_occurred)
         
         my_explorer = entities[0]
         
@@ -57,11 +57,18 @@ class World:
         for i, line in enumerate(d):
             self._setRow(i, line)
         self._get_dist_map()
+        self._getDeadEndCells()
             
     def isWalkable(self, x, y):
         if 0 < x < self.width and 0 < y < self.height:
             index = self._coordToIndex(x, y)
             return self._isWalkable(index)
+        return False
+        
+    def isDeadEnd(self, x, y):
+        if 0 < x < self.width and 0 < y < self.height:
+            index = self._coordToIndex(x, y)
+            return self._isDeadEnd(index)
         return False
         
     def getNeighbors(self, x, y, origin=False):
@@ -81,6 +88,20 @@ class World:
             return self._dist_map[((x1, y1), (x2, y2))]
         except KeyError:
             return 10000, (x1, y1)
+            
+    def getPath(self, x1, y1, x2, y2):
+        start = (x1, y1)
+        end = (x2, y2)
+        cell = start
+        path = []
+        
+        while cell != end:
+            path.append(cell)
+            cell = self.getDistance(cell[0], cell[1], end[0], end[1])[1]
+        
+        path.append(end)
+        
+        return path
             
     def hasLineOfSight(self, x1, y1, x2, y2):
         #must have either same xs or same ys
@@ -112,10 +133,36 @@ class World:
     def getShelterCoords(self):
         return [self._indexToCoord(x) for x in self.getShelters()]
     
+    def _getDeadEndCells(self):
+        to_process = collections.deque([c for c in self.getWalkableCells() if len(self._getNeighbors(c)) == 1])
+        dead_end_cells = []
+        
+        while to_process:
+            cell = to_process.popleft()
+            
+            neighbors = self._getNeighbors(cell)
+            if len(neighbors) <= 2:
+                for neighbor in neighbors:
+                    if neighbor not in dead_end_cells:
+                        to_process.append(neighbor)
+                
+                dead_end_cells.append(cell)
+        
+        #store this in variable
+        self._dead_end_cells = dead_end_cells
+        log(sorted([self._indexToCoord(i) for i in self._dead_end_cells]))
+        
     def _isWalkable(self, index):
         if 0 < index < self.size:
             return self.world[index] not in ['#']
         return False
+        
+    def _isDeadEnd(self, index):
+        return index in self._dead_end_cells
+        
+    def _getNeighbors(self, index, origin=False):
+        coords = self._indexToCoord(index)
+        return [self._coordToIndex(c[0], c[1]) for c in self.getNeighbors(coords[0], coords[1], origin=origin)]
             
     def _get_dist_map(self):
         #store the distance between a pair of coords
@@ -293,90 +340,60 @@ class Functions:
         other_explorers = [e for e in entities if e.isExplorer() and e is not my_explorer]
         minions = [m for m in entities if m.isMinion()]
         wanderers = [w for w in minions if w.isWanderer()]
+        wanderers_targeting_me = [w for w in wanderers if w.getTargetedExplorer() == my_explorer.entity_id]
+        wanderers_not_targeting_me = [w for w in wanderers if not w.isSpawning() and w not in wanderers_targeting_me]
+        
         slashers = [s for s in minions if s.isSlasher()]
         effects = [e for e in entities if e.isEffect()]
         shelters = [s for s in effects if s.isShelterEffect()]
         
-        current_dists_to_explorers = [world.getDistance(my_explorer.x, my_explorer.y, e.x, e.y)[0] for e in other_explorers]
-        current_dists_to_wanderers = [world.getDistance(my_explorer.x, my_explorer.y, e.x, e.y)[0] for e in wanderers]
-        current_dists_to_slashers = [world.getDistance(my_explorer.x, my_explorer.y, e.x, e.y)[0] for e in slashers]
-        current_dists_to_shelters = [world.getDistance(my_explorer.x, my_explorer.y, e.x, e.y)[0] for e in shelters]
-        
         move_options = {n: 0 for n in my_neighbor_cells}
         
         for neighbor in my_neighbor_cells:
-            #Stepping here gets us closer to another explorer
-            new_dists_to_explorers = [world.getDistance(neighbor[0], neighbor[1], e.x, e.y)[0] for e in other_explorers]
-            zipped_dists_to_explorers = zip(current_dists_to_explorers, new_dists_to_explorers)
-            for i, z in enumerate(zipped_dists_to_explorers):
-                #new < current
-                if z[1] < z[0]:
-                    move_options[neighbor] += 30
-            
-            for e in effects:
-                if e.isPlanEffect() and e.getRemainingEffectTime() > 1:
-                    if world.getDistance(neighbor[0], neighbor[1], e.x, e.y)[0] <= 2:
-                        move_options[neighbor] += 20
-            
-            new_dists_to_shelters = [world.getDistance(neighbor[0], neighbor[1], e.x, e.y)[0] for e in shelters]
-            zipped_dists_to_shelters = zip(current_dists_to_shelters, new_dists_to_shelters)
-            for i, z in enumerate(zipped_dists_to_shelters):
-                if shelters[i].getRemainingShelterEnergy() > 0:
-                    if z[1] < z[0]:
-                        move_options[neighbor] += 10
-                
-            new_dists_to_wanderers = [world.getDistance(neighbor[0], neighbor[1], e.x, e.y)[0] for e in wanderers]
-            zipped_dists_to_wanderers = zip(current_dists_to_wanderers, new_dists_to_wanderers)
-            for i, z in enumerate(zipped_dists_to_wanderers):
-                #new < current
-                if z[1] < z[0]:
-                    move_options[neighbor] -= 2
-                #new <= 1 !!BAD
-                if z[1] == 0:
+            for wanderer in wanderers:
+                if world.getDistance(neighbor[0], neighbor[1], wanderer.x, wanderer.y)[0] <= 1:
                     move_options[neighbor] -= 1000
-                if z[1] < 3:
-                    if wanderers[i].getTargetedExplorer() == my_explorer.entity_id:
-                        move_options[neighbor] -= 100
-                    else:
-                        move_options[neighbor] -= 2
+            for wanderer in wanderers_targeting_me:
+                current_distance = world.getDistance(my_explorer.x, my_explorer.y, wanderer.x, wanderer.y)[0]
+                anticipated_new_wanderer_location = world.getDistance(wanderer.x, wanderer.y, neighbor[0], neighbor[1])[1]
+                anticipated_new_distance = world.getDistance(neighbor[0], neighbor[1], anticipated_new_wanderer_location[0], anticipated_new_wanderer_location[1])[0]
+                if anticipated_new_distance < current_distance:
+                    move_options[neighbor] -= 100
+            for wanderer in wanderers_not_targeting_me:
+                target = [e for e in other_explorers if e.entity_id == wanderer.getTargetedExplorer()]
+                if target:
+                    target = target[0]
+                    for other_neighbor in world.getNeighbors(target.x, target.y):
+                        anticipated_new_wanderer_location = world.getDistance(wanderer.x, wanderer.y, other_neighbor[0], other_neighbor[1])[1]
+                        anticipated_new_distance_to_target = world.getDistance(other_neighbor[0], other_neighbor[1], anticipated_new_wanderer_location[0], anticipated_new_wanderer_location[1])[0]
+                        anticipated_new_distance_to_me = world.getDistance(anticipated_new_wanderer_location[0], anticipated_new_wanderer_location[1], neighbor[0], neighbor[1])[0]
+                        if anticipated_new_distance_to_me < anticipated_new_distance_to_target:
+                            move_options[neighbor] -= 10
         
-            new_dists_to_slashers = [world.getDistance(neighbor[0], neighbor[1], e.x, e.y)[0] for e in slashers]
-            zipped_dists_to_slashers = zip(current_dists_to_slashers, new_dists_to_slashers)
-            for i, z in enumerate(zipped_dists_to_slashers):
-                s = slashers[i]
-                #new < current
-                if z[1] < z[0]:
-                    move_options[neighbor] -= 2
-                #LOS
-                if s.isSpawning():
+            for slasher in slashers:
+                if slasher.isSpawning():
                     pass
-                elif s.isWandering():
+                elif slasher.isWandering():
+                    if world.hasLineOfSight(slasher.x, slasher.y, neighbor[0], neighbor[1]):
+                        move_options[neighbor] -= 20
+                elif slasher.isStalking():
+                    if world.hasLineOfSight(slasher.x, slasher.y, neighbor[0], neighbor[1]):
+                        move_options[neighbor] -= 50
+                elif slasher.isRushing():
+                    if world.hasLineOfSight(slasher.x, slasher.y, neighbor[0], neighbor[1]):
+                        move_options[neighbor] -= 100
+                elif slasher.isStunned():
                     pass
-                elif s.isStalking():
-                    if world.hasLineOfSight(my_explorer.x, my_explorer.y, s.x, s.y):
-                        if s.getTargetedExplorer() == my_explorer.entity_id:
-                            move_options[neighbor] -= 1000
-                        else:
-                            move_options[neighbor] -= 50 #TODO: figure out if its possible to be targeted next turn
-                elif s.isRushing():
-                    target = [e for e in entities if s.getTargetedExplorer() == e.entity_id]
-                    if target and (target[0].x, target[0].y) == neighbor:
-                        #Rushing to this location
-                        move_options[neighbor] -= 1000
-                    elif world.hasLineOfSight(s.x, s.y, my_explorer.x, my_explorer.y):
-                        move_options[neighbor] -= 500    
-                elif s.isStunned():
-                    pass
-                    
+                
         #visualize move options:
-        display_u = (my_explorer.x, my_explorer.y-1)
-        display_d = (my_explorer.x, my_explorer.y+1)
-        display_l = (my_explorer.x-1, my_explorer.y)
-        display_r = (my_explorer.x+1, my_explorer.y)
-        display_c = (my_explorer.x, my_explorer.y)
-        log("{:^5s}{:^5s}{:^5s}".format("", str(move_options[display_u]) if display_u in move_options else "#####", ""))
-        log("{:^5s}{:^5s}{:^5s}".format(str(move_options[display_l]) if display_l in move_options else "#####", str(move_options[display_c]) if display_c in move_options else "#####", str(move_options[display_r]) if display_r in move_options else "#####"))
-        log("{:^5s}{:^5s}{:^5s}".format("", str(move_options[display_d]) if display_d in move_options else "#####", ""))
+        coord_u = (my_explorer.x, my_explorer.y-1)
+        coord_d = (my_explorer.x, my_explorer.y+1)
+        coord_l = (my_explorer.x-1, my_explorer.y)
+        coord_r = (my_explorer.x+1, my_explorer.y)
+        coord_c = (my_explorer.x, my_explorer.y)
+        log("{:^5s} {:^5s} {:^5s}".format("", str(move_options[coord_u]) if coord_u in move_options else "#####", ""))
+        log("{:^5s} {:^5s} {:^5s}".format(str(move_options[coord_l]) if coord_l in move_options else "#####", str(move_options[coord_c]) if coord_c in move_options else "#####", str(move_options[coord_r]) if coord_r in move_options else "#####"))
+        log("{:^5s} {:^5s} {:^5s}".format("", str(move_options[coord_d]) if coord_d in move_options else "#####", ""))
         
         move_scores = list(move_options.items())
         move_scores.sort(key=lambda x: x[1], reverse=True)
@@ -384,28 +401,8 @@ class Functions:
         if move_scores:
             best_move = move_scores[0][0]
             best_score = move_scores[0][1]
-            if best_move != (my_explorer.x, my_explorer.y) and any(x[1] < 30 for x in move_scores): #If no values are very negative, then there is not an active threat
+            if best_move != coord_c and best_score != move_options[coord_c]: #and any(x[1] < 30 for x in move_scores): #If no values are very negative, then there is not an active threat
                 return "MOVE {} {}".format(best_move[0], best_move[1])
-            
-        #We decided not moving is best.. but we may not need to WAIT. lets see if theres a better option
-        explorers_near_by = [e for e in Functions.getEntitiesAt(world, entities, my_explorer.x, my_explorer.y, steps=2) if e in other_explorers]
-        if explorers_near_by and my_explorer.getRemainingPlans() > 0 and not my_explorer.hasPlan:
-            return "PLAN"
-        
-        minions_targeting_me = [m for m in minions if m.getTargetedExplorer() == my_explorer.entity_id]
-        minions_targeting_me_dists = [world.getDistance(m.x, m.y, my_explorer.x, my_explorer.y)[0] for m in minions_targeting_me]
-        explorers_near_by = [e for e in Functions.getEntitiesAt(world, entities, my_explorer.x, my_explorer.y, steps=4) if e in other_explorers]
-        if any(3 < x < 6 for x in minions_targeting_me_dists) and my_explorer.getRemainingLights() > 0 and not my_explorer.hasLight and explorers_near_by and any(world.getDistance(m.x, m.y, e.x, e.y) < world.getDistance(m.x, m.y, my_explorer.x, my_explorer.y) for m in minions for e in other_explorers):
-            return "LIGHT"
-        
-        explorers_not_yelled = [e for e in other_explorers if e.entity_id not in my_explorer.yelled_players]
-        explorers_not_yelled_dists = [world.getDistance(e.x, e.y, my_explorer.x, my_explorer.y)[0] for e in explorers_not_yelled]
-        if any(x <= 1 for x in explorers_not_yelled_dists):
-            #May be a good time to yell, someone is within distance. make sure there is a minion nearby
-            entities_near_by = Functions.getEntitiesAt(world, entities, my_explorer.x, my_explorer.y, steps=2)
-            minions_near_by = [m for m in entities_near_by if m.isMinion() and not m.isSpawning()]
-            if minions_near_by:
-                return "YELL"
         
         return "WAIT"
                 
